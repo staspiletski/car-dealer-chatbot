@@ -177,7 +177,7 @@ export default function ChatInterface() {
                         onChange={(e) => setInput(e.target.value)}
                         placeholder="Ask about vehicles, prices, features..."
                         disabled={isLoading}
-                        className="flex-1 px-4 py-3 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-slate-100"
+                        className="flex-1 px-4 py-3 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-slate-100 text-black"
                     />
                     <button
                         type="submit"
