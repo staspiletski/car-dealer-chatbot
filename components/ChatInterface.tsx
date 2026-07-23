@@ -1,3 +1,5 @@
+// components/ChatInterface.tsx - FIXED VERSION
+
 'use client';
 
 import { useState, useRef, useEffect } from 'react';
@@ -26,11 +28,23 @@ export default function ChatInterface() {
         });
     };
 
-    // Initialize session on mount
+    // Initialize session on mount - CHECK LOCALSTORAGE FIRST
     useEffect(() => {
-        const uuid = generateUUID();
-        console.log('🆔 Generated session ID:', uuid);
-        setSessionId(uuid);
+        console.log('🔄 [ChatInterface] Initializing session...');
+
+        // Check if session exists in localStorage
+        const savedSessionId = localStorage.getItem('activeSessionId');
+
+        if (savedSessionId) {
+            console.log('📂 [ChatInterface] Restored session from localStorage:', savedSessionId);
+            setSessionId(savedSessionId);
+        } else {
+            // Generate NEW UUID only if no saved session
+            const newUuid = generateUUID();
+            console.log('✨ [ChatInterface] Generated new session:', newUuid);
+            localStorage.setItem('activeSessionId', newUuid);
+            setSessionId(newUuid);
+        }
     }, []);
 
     // Auto-scroll to bottom
@@ -41,7 +55,7 @@ export default function ChatInterface() {
     const handleSendMessage = async (e: React.FormEvent) => {
         e.preventDefault();
 
-        if (!input.trim() || isLoading) return;
+        if (!input.trim() || isLoading || !sessionId) return;
 
         const userMessage: Message = {
             id: `msg_${Date.now()}`,
@@ -73,6 +87,36 @@ export default function ChatInterface() {
 
             const data = await response.json();
 
+            // ✅ CRITICAL FIX: Handle /load command response
+            if (data.command?.type === 'load' && data.command?.activeSessionId) {
+                console.log('📂 [ChatInterface] /load command executed');
+                console.log('📂 [ChatInterface] Loaded session ID:', data.command.activeSessionId);
+                console.log('📂 [ChatInterface] Updating sessionId from:', sessionId, 'to:', data.command.activeSessionId);
+
+                // Update to the loaded session
+                setSessionId(data.command.activeSessionId);
+                localStorage.setItem('activeSessionId', data.command.activeSessionId);
+
+                // Restore the loaded messages if available
+                if (data.command.restoredMessages && Array.isArray(data.command.restoredMessages)) {
+                    console.log('📂 [ChatInterface] Restoring', data.command.restoredMessages.length, 'messages from loaded session');
+                    const restoredMessages: Message[] = data.command.restoredMessages.map((msg: any, index: number) => ({
+                        id: `restored_${index}`,
+                        role: msg.role,
+                        content: msg.content,
+                        timestamp: new Date(msg.timestamp)
+                    }));
+                    setMessages(restoredMessages);
+                }
+            }
+
+            // ✅ Handle /clear command
+            if (data.command?.type === 'clear_confirmed') {
+                console.log('🗑️ [ChatInterface] Clearing messages from UI');
+                setMessages([]);
+            }
+
+            // Show command or bot response
             const botMessage: Message = {
                 id: `msg_${Date.now()}`,
                 role: 'assistant',
@@ -176,19 +220,19 @@ export default function ChatInterface() {
                         value={input}
                         onChange={(e) => setInput(e.target.value)}
                         placeholder="Ask about vehicles, prices, features..."
-                        disabled={isLoading}
-                        className="flex-1 px-4 py-3 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-slate-100 text-black"
+                        disabled={isLoading || !sessionId}
+                        className="flex-1 px-4 py-3 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-slate-100 text-blue-950"
                     />
                     <button
                         type="submit"
-                        disabled={isLoading || !input.trim()}
+                        disabled={isLoading || !input.trim() || !sessionId}
                         className="px-6 py-3 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 disabled:bg-slate-300 transition-colors"
                     >
                         {isLoading ? '⏳' : '📤'}
                     </button>
                 </form>
                 <p className="text-xs text-slate-500 mt-2">
-                    💡 Try: "I want an affordable SUV" or "Show me sports cars under $50k"
+                    💡 Try: "I want an affordable SUV" or "Show me sports cars under $50k" or "/sessions" to see previous chats
                 </p>
             </div>
         </div>
