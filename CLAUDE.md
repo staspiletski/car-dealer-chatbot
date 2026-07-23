@@ -11,8 +11,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `npm run start` — run production build
 - `npm run lint` — ESLint (flat config in `eslint.config.mjs`, extends `eslint-config-next`)
 - `node lib/db/init-db.js` — create tables from `lib/db/schema.sql` and seed dummy vehicle data (requires `DATABASE_URL` in `.env.local`)
-
-There is no test suite configured.
+- `npm run test:unit` — Vitest unit tests (`tests/unit/`), no DB required
+- `npm run test:integration` — Vitest integration tests (`tests/integration/`) against the local Postgres instance in `DATABASE_URL`
+- `npm run test:e2e` — Playwright end-to-end tests (`tests/e2e/`); starts/reuses the dev server automatically
+- `npm test` — runs all three suites in sequence
 
 ## Architecture
 
@@ -42,3 +44,5 @@ Blocked requests (steps 1–2 only, not rate-limit hits) are logged to `blocked_
 **Session handling**: session ids are client-generated UUIDs (`ChatInterface.tsx` rolls its own UUIDv4 via `Math.random()`, not `crypto.randomUUID()` or the `uuid` package already in `package.json`), with no auth. Sessions are created implicitly on first message rather than through an explicit endpoint.
 
 **Anthropic integration**: model id (`claude-opus-4-6`) and both system prompts are inline in `route.ts`, not centralized. The first system prompt forbids discussing database/system-administration topics outside vehicle sales — preserve this constraint when editing prompts. Chat history sent to the model on each turn is the *entire* `chat_messages` table for that session with no truncation/summarization.
+
+**Session management commands**: `/sessions`, `/load [reference]`, `/clear`, `/help` are handled entirely by `lib/services/commandRouter.ts` (`createCommandRouter`, a dependency-injected, framework-independent business/service layer — see `parseCommand` for the recognized syntax) and dispatched from `route.ts` *before* any Anthropic call; command turns are never persisted to `chat_messages`. Since the app has no auth, ownership is enforced entirely client-side: `components/ChatInterface.tsx` persists `activeSessionId` and a capped, most-recent-first `sessionHistory` array in `localStorage`, and sends `sessionHistory` as `knownSessionIds` on every request — the server only ever answers `/sessions`/`/load` questions about IDs the client already submitted (never a general session lookup), and `/sessions`/`/load`'s numbering excludes any session with zero messages so a just-created empty session never appears as a "previous conversation." See `specs/001-chat-session-commands/contracts/chat-api.md` for the exact request/response shape.

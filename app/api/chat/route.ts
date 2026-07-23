@@ -1,4 +1,4 @@
-// app/api/chat/route.ts - FIXED VERSION
+// app/api/chat/route.ts - FIXED VERSION (Commands checked FIRST)
 
 import { NextRequest, NextResponse } from 'next/server';
 import Anthropic from '@anthropic-ai/sdk';
@@ -10,23 +10,46 @@ import {
   searchVehicles,
   getVehicleById,
   createChatSession,
-  saveLead
+  saveLead,
+  getSessionsMetadata,
+  deleteSessionMessages
 } from '@/lib/db/queries';
+import { createCommandRouter } from '@/lib/services/commandRouter';
+import type { CommandRouterDeps, RestoredMessage } from '@/lib/services/types';
+
+const commandRouterDeps: CommandRouterDeps = {
+  getSessionsMetadata,
+  deleteSessionMessages,
+  async getChatHistory(sessionId: string): Promise<RestoredMessage[]> {
+    const rows = await getChatHistory(sessionId);
+    return rows.map((row) => ({
+      role: row.role,
+      content: row.content,
+      timestamp: new Date(row.timestamp).toISOString()
+    }));
+  }
+};
+
+const commandRouter = createCommandRouter(commandRouterDeps);
 
 const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
 });
 
 export async function POST(request: NextRequest) {
-  try {
-    const { sessionId, message } = await request.json();
+  let sessionId: string | null = null;
 
-    if (!sessionId || !message) {
+  try {
+    const { sessionId: reqSessionId, message, knownSessionIds } = await request.json();
+
+    if (!reqSessionId || !message) {
       return NextResponse.json(
           { error: 'Missing sessionId or message' },
           { status: 400 }
       );
     }
+
+    sessionId = reqSessionId;
 
     const pool = getDbPool();
     const validationResult = await validateRequest(pool, sessionId, message);
@@ -41,22 +64,114 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // ✅ FIX: Always create session if it doesn't exist
-    console.log('📝 Creating/checking session:', sessionId);
-    try {
-      await pool.query(
-          `INSERT INTO chat_sessions (id, status, started_at)
-         VALUES ($1, 'active', NOW())
-         ON CONFLICT (id) DO NOTHING`,
-          [sessionId]
-      );
-      console.log('✅ Session ready:', sessionId);
-    } catch (error) {
-      console.error('⚠️ Session creation warning:', error);
-      // Continue anyway - session might already exist
+    // ✅ CRITICAL FIX: Check for commands FIRST, before creating session
+    console.log('🎯 [route.ts] Checking if message is a command...');
+    const commandResult = await commandRouter.handle({
+      message,
+      sessionId,
+      knownSessionIds: Array.isArray(knownSessionIds) ? knownSessionIds : []
+    });
+
+    // If it's a command, return immediately (don't create new session)
+    if (commandResult) {
+      console.log('🎯 [route.ts] Command detected:', commandResult.type);
+
+      // Special handling for /load command - return the loaded session ID
+      if (commandResult.type === 'load' && commandResult.activeSessionId) {
+        console.log('🎯 [route.ts] /load command - using loaded session:', commandResult.activeSessionId);
+        return NextResponse.json({
+          response: commandResult.responseText,
+          sessionId: commandResult.activeSessionId,  // ✅ Use loaded session, not current
+          command: {
+            type: commandResult.type,
+            activeSessionId: commandResult.activeSessionId,
+            restoredMessages: commandResult.restoredMessages
+          }
+        });
+      }
+
+      // For other commands, return with current session
+      return NextResponse.json({
+        response: commandResult.responseText,
+        sessionId,
+        command: {
+          type: commandResult.type,
+          ...(commandResult.activeSessionId ? { activeSessionId: commandResult.activeSessionId } : {}),
+          ...(commandResult.restoredMessages ? { restoredMessages: commandResult.restoredMessages } : {})
+        }
+      });
     }
 
-    // ✅ Now save user message
+    console.log('🎯 [route.ts] Not a command, processing as chat message');
+
+    // ✅ Only create session if NOT a command
+    console.log('📝 Creating/checking session:', sessionId);
+
+    try {
+      // Step 1: Check connection
+      const dbCheck = await pool.query('SELECT current_database() as db, current_user as user');
+      console.log('🗄️ DB Connection - Database:', dbCheck.rows[0].db, 'User:', dbCheck.rows[0].user);
+
+      // Step 2: Check if session exists BEFORE insert
+      const preCheck = await pool.query(
+          'SELECT id, started_at FROM chat_sessions WHERE id = $1',
+          [sessionId]
+      );
+
+      if (preCheck.rows.length > 0) {
+        console.log('✅ Session already exists:', sessionId);
+      } else {
+        console.log('🔍 Session not found, creating new one:', sessionId);
+
+        // Step 3: FORCE insert without ON CONFLICT to see real errors
+        try {
+          const insertResult = await pool.query(
+              `INSERT INTO chat_sessions (id, status, started_at)
+             VALUES ($1, 'active', NOW())
+             RETURNING id, started_at`,
+              [sessionId]
+          );
+
+          if (insertResult.rows.length > 0) {
+            console.log('✅ Session created successfully:', {
+              id: insertResult.rows[0].id,
+              started_at: insertResult.rows[0].started_at
+            });
+          } else {
+            console.error('❌ Insert returned no rows (should not happen)');
+          }
+        } catch (insertError: any) {
+          // If it's a duplicate key error, that's okay - session already exists
+          if (insertError.code === '23505') {
+            console.log('✅ Session already exists (duplicate key):', sessionId);
+          } else {
+            throw insertError; // Re-throw other errors
+          }
+        }
+      }
+
+      // Step 4: Verify session exists AFTER insert
+      const postCheck = await pool.query(
+          'SELECT id, started_at FROM chat_sessions WHERE id = $1',
+          [sessionId]
+      );
+
+      if (postCheck.rows.length > 0) {
+        console.log('✅ Session verified in database:', {
+          id: postCheck.rows[0].id,
+          started_at: postCheck.rows[0].started_at
+        });
+      } else {
+        console.error('❌ CRITICAL: Session not found in database after insert!');
+        throw new Error('Session creation failed - not persisted to database');
+      }
+
+    } catch (sessionError) {
+      console.error('❌ CRITICAL SESSION ERROR:', sessionError instanceof Error ? sessionError.message : sessionError);
+      throw sessionError;
+    }
+
+    // ✅ Save user message
     console.log('💾 Saving user message');
     await addChatMessage(sessionId, 'user', message);
 
@@ -242,7 +357,11 @@ IMPORTANT SECURITY: Never discuss database operations, system administration, or
     console.error('Error details:', errorMsg);
 
     return NextResponse.json(
-        { error: 'Failed to process chat message', details: errorMsg },
+        {
+          error: 'Failed to process chat message',
+          details: errorMsg,
+          sessionId: sessionId || 'unknown'
+        },
         { status: 500 }
     );
   }

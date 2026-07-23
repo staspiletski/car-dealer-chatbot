@@ -1,4 +1,5 @@
 import { getDbPool } from './pool';
+import type { SessionSummary } from '../services/types';
 
 export async function getVehicles(limit = 10): Promise<any[]> {
     const pool = getDbPool();
@@ -52,8 +53,8 @@ export async function createChatSession(
     const pool = getDbPool();
     const result = await pool.query(
         `INSERT INTO chat_sessions (id, customer_email, customer_name, status, started_at)
-     VALUES ($1, $2, $3, 'active', NOW())
-     RETURNING *`,
+         VALUES ($1, $2, $3, 'active', NOW())
+             RETURNING *`,
         [sessionId, customerEmail || null, customerName || null]
     );
     return result.rows[0];
@@ -76,8 +77,8 @@ export async function addChatMessage(
     const pool = getDbPool();
     const result = await pool.query(
         `INSERT INTO chat_messages (session_id, role, content, timestamp)
-     VALUES ($1, $2, $3, NOW())
-     RETURNING *`,
+         VALUES ($1, $2, $3, NOW())
+             RETURNING *`,
         [sessionId, role, content]
     );
     return result.rows[0];
@@ -94,9 +95,9 @@ export async function saveLead(
     try {
         const result = await pool.query(
             `INSERT INTO leads (email, name, phone, preferences, session_id, created_at)
-       VALUES ($1, $2, $3, $4, $5, NOW())
-       ON CONFLICT (email) DO UPDATE SET preferences = $4
-       RETURNING *`,
+             VALUES ($1, $2, $3, $4, $5, NOW())
+                 ON CONFLICT (email) DO UPDATE SET preferences = $4
+                                            RETURNING *`,
             [email, name, phone, JSON.stringify(preferences), sessionId || null]
         );
         return result.rows[0];
@@ -119,4 +120,69 @@ export function validateEmail(email: string): string {
         throw new Error('Invalid email format');
     }
     return email;
+}
+
+/**
+ * FIXED: Get session metadata for display in /sessions command
+ *
+ * Previously: Returned empty array when sessionIds was empty
+ * Now: Fetches ALL sessions when sessionIds is empty, or filters to specific ones
+ *
+ * @param sessionIds - Array of session IDs to fetch. If empty, fetches ALL sessions.
+ * @returns Array of SessionSummary objects with id, startedAt, messageCount
+ */
+export async function getSessionsMetadata(sessionIds: string[]): Promise<SessionSummary[]> {
+    const pool = getDbPool();
+
+    try {
+        let query = `
+            SELECT cs.id, cs.started_at, COUNT(cm.id) AS message_count
+            FROM chat_sessions cs
+                     LEFT JOIN chat_messages cm ON cm.session_id = cs.id
+            GROUP BY cs.id
+            ORDER BY cs.started_at DESC
+                LIMIT 100
+        `;
+
+        const params: any[] = [];
+
+        // If specific session IDs are provided, filter to those only
+        if (sessionIds.length > 0) {
+            console.log('📊 [getSessionsMetadata] Filtering to specific sessions:', sessionIds.length);
+            query = `
+                SELECT cs.id, cs.started_at, COUNT(cm.id) AS message_count
+                FROM chat_sessions cs
+                         LEFT JOIN chat_messages cm ON cm.session_id = cs.id
+                WHERE cs.id = ANY($1)
+                GROUP BY cs.id
+                ORDER BY cs.started_at DESC
+                    LIMIT 100
+            `;
+            params.push(sessionIds);
+        } else {
+            console.log('📊 [getSessionsMetadata] Fetching ALL sessions from database');
+        }
+
+        const result = await pool.query(query, params.length > 0 ? params : []);
+
+        console.log('📊 [getSessionsMetadata] Query returned:', result.rows.length, 'sessions');
+
+        return result.rows.map((row) => ({
+            id: row.id,
+            startedAt: new Date(row.started_at).toISOString(),
+            messageCount: parseInt(row.message_count, 10),
+        }));
+    } catch (error) {
+        console.error('❌ [getSessionsMetadata] Error fetching session metadata:', error);
+        return [];
+    }
+}
+
+export async function deleteSessionMessages(sessionId: string): Promise<number> {
+    const pool = getDbPool();
+    const result = await pool.query(
+        `DELETE FROM chat_messages WHERE session_id = $1`,
+        [sessionId]
+    );
+    return result.rowCount ?? 0;
 }
